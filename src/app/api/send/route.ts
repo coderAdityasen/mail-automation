@@ -67,13 +67,25 @@ export async function POST(request: Request) {
     }
 
     const isHtml = formData.get('isHtml') === 'true';
+    const trackingId = formData.get('trackingId') as string | null;
+
+    // Get the base URL from the request headers to construct the tracking URL
+    const host = request.headers.get('host') || 'localhost:3000';
+    const protocol = host.includes('localhost') ? 'http' : 'https';
+    const baseUrl = `${protocol}://${host}`;
+
+    let finalHtml = isHtml ? body : body.replace(/\n/g, '<br>');
+    if (trackingId) {
+      const trackingUrl = `${baseUrl}/api/track?id=${trackingId}`;
+      finalHtml += `<img src="${trackingUrl}" width="1" height="1" alt="" style="display:none;" />`;
+    }
 
     const mailOptions = {
       from: userEmail,
       to: recipient,
       subject: subject,
       text: body,
-      html: isHtml ? body : body.replace(/\n/g, '<br>'),
+      html: finalHtml,
       attachments: attachments,
     };
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Mail, User, FileText, Paperclip, Send, CheckCircle2, AlertCircle, Loader2, Plus, Save, Sidebar, Code, Settings, X, Table, LogOut } from 'lucide-react';
+import { Mail, User, FileText, Paperclip, Send, CheckCircle2, AlertCircle, Loader2, Plus, Save, Sidebar, Code, Settings, X, Table, LogOut, Eye, Clock } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import Link from 'next/link';
 
@@ -21,6 +21,16 @@ interface SheetRow {
   message?: string;
 }
 
+interface EmailLog {
+  id: string;
+  recipient: string;
+  subject: string;
+  profile_name: string;
+  status: string;
+  opened_at: string | null;
+  created_at: string;
+}
+
 export default function Home() {
   // Auth State
   const [user, setUser] = useState<any>(null);
@@ -34,6 +44,7 @@ export default function Home() {
   const [mode, setMode] = useState<'single' | 'sheet'>('single');
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  const [emailLogs, setEmailLogs] = useState<EmailLog[]>([]);
   
   // Single Form State
   const [recipient, setRecipient] = useState('');
@@ -59,14 +70,20 @@ export default function Home() {
       const { data: { session } } = await supabase.auth.getSession();
       setUser(session?.user ?? null);
       setAuthInit(false);
-      if (session?.user) fetchProfiles();
+      if (session?.user) {
+        fetchProfiles();
+        fetchLogs(session.user.id);
+      }
     };
 
     initAuth();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
-      if (session?.user) fetchProfiles();
+      if (session?.user) {
+        fetchProfiles();
+        fetchLogs(session.user.id);
+      }
     });
 
     const storedEmail = localStorage.getItem('smtpEmail');
@@ -76,6 +93,39 @@ export default function Home() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  // Set up real-time subscription for email logs
+  useEffect(() => {
+    if (!user) return;
+    const channel = supabase.channel('realtime:email_logs')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'email_logs', filter: `user_id=eq.${user.id}` }, (payload) => {
+        fetchLogs(user.id); // Reload logs on any change
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [user]);
+
+  const fetchProfiles = async () => {
+    try {
+      const { data } = await supabase.from('profiles').select('*').order('name');
+      if (data) setProfiles(data);
+    } catch (e) {
+      console.warn("Supabase not properly initialized");
+    }
+  };
+
+  const fetchLogs = async (userId: string) => {
+    try {
+      const { data } = await supabase
+        .from('email_logs')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+      if (data) setEmailLogs(data);
+    } catch (e) {
+      console.warn("Error fetching logs");
+    }
+  };
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -88,7 +138,7 @@ export default function Home() {
         const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
         if (error) throw error;
         setStatus('success');
-        setMessage('Signup successful! If email confirmation is enabled in Supabase, please check your inbox.');
+        setMessage('Signup successful! (If unconfirmed, check your email)');
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
         if (error) throw error;
@@ -104,16 +154,8 @@ export default function Home() {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setProfiles([]);
+    setEmailLogs([]);
     setActiveProfileId(null);
-  };
-
-  const fetchProfiles = async () => {
-    try {
-      const { data } = await supabase.from('profiles').select('*').order('name');
-      if (data) setProfiles(data);
-    } catch (e) {
-      console.warn("Supabase not properly initialized");
-    }
   };
 
   const handleSelectProfile = (profile: Profile) => {
@@ -180,6 +222,30 @@ export default function Home() {
     setTimeout(() => setStatus('idle'), 4000);
   };
 
+  const createTrackingLog = async (email: string, sub: string, pName: string) => {
+    if (!user) return null;
+    try {
+      const { data, error } = await supabase.from('email_logs').insert([{
+        user_id: user.id,
+        recipient: email,
+        subject: sub,
+        profile_name: pName,
+        status: 'Sending'
+      }]).select().single();
+      
+      if (error) throw error;
+      return data.id;
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+  };
+
+  const updateTrackingLog = async (id: string, status: string) => {
+    if (!user || !id) return;
+    await supabase.from('email_logs').update({ status }).eq('id', id);
+  };
+
   const handleSubmitSingle = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -194,6 +260,11 @@ export default function Home() {
     setStatus('idle');
     setMessage('');
 
+    const activeProfile = profiles.find(p => p.id === activeProfileId);
+    const pName = activeProfile?.name || 'Manual Entry';
+
+    const trackingId = await createTrackingLog(recipient, subject, pName);
+
     const formData = new FormData();
     formData.append('recipient', recipient);
     formData.append('subject', subject);
@@ -201,26 +272,29 @@ export default function Home() {
     formData.append('isHtml', String(isHtmlMode));
     formData.append('smtpEmail', smtpEmail);
     formData.append('smtpPassword', smtpPassword);
+    if (trackingId) formData.append('trackingId', trackingId);
     
     if (file) {
       formData.append('file', file);
-    } else if (activeProfileId) {
-      const existingProfile = profiles.find(p => p.id === activeProfileId);
-      if (existingProfile?.resume_path) formData.append('resumePath', existingProfile.resume_path);
+    } else if (activeProfile) {
+      if (activeProfile.resume_path) formData.append('resumePath', activeProfile.resume_path);
     }
 
     try {
       const res = await fetch('/api/send', { method: 'POST', body: formData });
       const data = await res.json();
       if (res.ok) {
+        if (trackingId) await updateTrackingLog(trackingId, 'Sent');
         setStatus('success');
         setMessage('Email sent successfully!');
         setRecipient('');
       } else {
+        if (trackingId) await updateTrackingLog(trackingId, 'Error');
         setStatus('error');
         setMessage(`Error: ${data.error}`);
       }
     } catch (error) {
+      if (trackingId) await updateTrackingLog(trackingId, 'Error');
       setStatus('error');
       setMessage('An unexpected error occurred.');
     } finally {
@@ -246,6 +320,9 @@ export default function Home() {
 
     setRows(prev => prev.map(r => r.id === rowId ? { ...r, status: 'sending', email } : r));
 
+    const activeProfile = profiles.find(p => p.id === activeProfileId);
+    const trackingId = await createTrackingLog(email, subject, activeProfile?.name || 'Sheet Entry');
+
     const formData = new FormData();
     formData.append('recipient', email);
     formData.append('subject', subject);
@@ -253,16 +330,17 @@ export default function Home() {
     formData.append('isHtml', String(isHtmlMode));
     formData.append('smtpEmail', smtpEmail);
     formData.append('smtpPassword', smtpPassword);
+    if (trackingId) formData.append('trackingId', trackingId);
     
-    const existingProfile = profiles.find(p => p.id === activeProfileId);
-    if (existingProfile?.resume_path) {
-      formData.append('resumePath', existingProfile.resume_path);
+    if (activeProfile?.resume_path) {
+      formData.append('resumePath', activeProfile.resume_path);
     }
 
     try {
       const res = await fetch('/api/send', { method: 'POST', body: formData });
       const data = await res.json();
       if (res.ok) {
+        if (trackingId) await updateTrackingLog(trackingId, 'Sent');
         setRows(prev => {
           const newRows = prev.map(r => r.id === rowId ? { ...r, status: 'success' as const, message: 'Sent' } : r);
           if (rowIdx === prev.length - 1) {
@@ -271,9 +349,11 @@ export default function Home() {
           return newRows;
         });
       } else {
+        if (trackingId) await updateTrackingLog(trackingId, 'Error');
         setRows(prev => prev.map(r => r.id === rowId ? { ...r, status: 'error', message: data.error } : r));
       }
     } catch (error) {
+      if (trackingId) await updateTrackingLog(trackingId, 'Error');
       setRows(prev => prev.map(r => r.id === rowId ? { ...r, status: 'error', message: 'Failed to send' } : r));
     }
   };
@@ -284,7 +364,7 @@ export default function Home() {
 
   const activeProfile = profiles.find(p => p.id === activeProfileId);
 
-  // Loading Screen while checking auth
+  // Loading Screen
   if (authInit) {
     return <div className="min-h-screen bg-gray-50 flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-blue-600" /></div>;
   }
@@ -294,9 +374,7 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 font-sans relative">
         <div className="absolute top-4 left-4">
-          <Link href="/" className="text-gray-500 hover:text-blue-600 font-medium text-sm flex items-center">
-            ← Back to Home
-          </Link>
+          <Link href="/" className="text-gray-500 hover:text-blue-600 font-medium text-sm flex items-center">← Back to Home</Link>
         </div>
         <div className="sm:mx-auto sm:w-full sm:max-w-md">
           <div className="flex justify-center mb-4">
@@ -306,7 +384,6 @@ export default function Home() {
             {authMode === 'login' ? 'Sign in to MailMate' : 'Create an Account'}
           </h2>
         </div>
-
         <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
           <div className="bg-white py-8 px-4 shadow-xl sm:rounded-2xl sm:px-10 border border-gray-100">
             <form className="space-y-6" onSubmit={handleAuth}>
@@ -316,27 +393,23 @@ export default function Home() {
                   <input type="email" required value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
                 </div>
               </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700">Password</label>
                 <div className="mt-1">
                   <input type="password" required value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
                 </div>
               </div>
-
               <div>
-                <button type="submit" disabled={authLoading} className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                <button type="submit" disabled={authLoading} className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">
                   {authLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : (authMode === 'login' ? 'Sign in' : 'Sign up')}
                 </button>
               </div>
             </form>
-            
             {status !== 'idle' && (
               <div className={`mt-4 rounded-lg p-3 flex items-center ${status === 'success' ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'}`}>
                 <p className="text-sm font-medium">{message}</p>
               </div>
             )}
-
             <div className="mt-6 text-center">
               <button onClick={() => { setAuthMode(authMode === 'login' ? 'signup' : 'login'); setStatus('idle'); }} className="text-sm text-blue-600 hover:text-blue-500 font-medium">
                 {authMode === 'login' ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
@@ -349,79 +422,48 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-gray-50 flex font-sans relative">
+    <main className="min-h-screen bg-gray-50 flex font-sans relative overflow-hidden">
       
       {/* Settings Modal */}
       {isSettingsOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/50 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
             <div className="flex justify-between items-center p-6 border-b border-gray-100 bg-gray-50/50">
-              <h3 className="font-bold text-gray-800 text-lg flex items-center">
-                <Settings className="w-5 h-5 mr-2 text-gray-600" />
-                SMTP Settings
-              </h3>
-              <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-gray-600">
-                <X className="w-5 h-5" />
-              </button>
+              <h3 className="font-bold text-gray-800 text-lg flex items-center"><Settings className="w-5 h-5 mr-2 text-gray-600" /> SMTP Settings</h3>
+              <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
             </div>
             <div className="p-6 space-y-4">
-              <p className="text-sm text-gray-600 mb-4">
-                Configure your own Gmail account. Details are saved securely in your browser.
-              </p>
+              <p className="text-sm text-gray-600 mb-4">Configure your own Gmail account. Details are saved securely in your browser.</p>
               <div className="space-y-2">
                 <label className="block text-sm font-semibold text-gray-700">Gmail Address</label>
-                <input
-                  type="email"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-2.5 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500"
-                  value={smtpEmail}
-                  onChange={(e) => setSmtpEmail(e.target.value)}
-                />
+                <input type="email" className="w-full rounded-lg border border-gray-300 px-4 py-2.5 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500" value={smtpEmail} onChange={(e) => setSmtpEmail(e.target.value)} />
               </div>
               <div className="space-y-2">
                 <label className="block text-sm font-semibold text-gray-700">App Password</label>
-                <input
-                  type="password"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-2.5 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500"
-                  value={smtpPassword}
-                  onChange={(e) => setSmtpPassword(e.target.value)}
-                />
+                <input type="password" className="w-full rounded-lg border border-gray-300 px-4 py-2.5 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500" value={smtpPassword} onChange={(e) => setSmtpPassword(e.target.value)} />
               </div>
             </div>
             <div className="p-4 border-t border-gray-100 bg-gray-50 flex justify-end space-x-3">
-              <button onClick={() => setIsSettingsOpen(false)} className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800">
-                Cancel
-              </button>
-              <button onClick={handleSaveSettings} className="px-5 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg">
-                Save Settings
-              </button>
+              <button onClick={() => setIsSettingsOpen(false)} className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={handleSaveSettings} className="px-5 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg">Save Settings</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Sidebar */}
-      <div className="w-64 bg-white border-r border-gray-200 flex flex-col hidden md:flex">
+      {/* Left Sidebar - Profiles */}
+      <div className="w-64 bg-white border-r border-gray-200 flex flex-col hidden md:flex shrink-0">
         <div className="p-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
           <div className="flex items-center">
             <Sidebar className="w-5 h-5 text-gray-500 mr-2" />
             <h1 className="font-semibold text-gray-700">Profiles</h1>
           </div>
-          <button onClick={handleLogout} title="Log out" className="text-gray-400 hover:text-red-500 transition-colors">
-            <LogOut className="w-4 h-4" />
-          </button>
+          <button onClick={handleLogout} title="Log out" className="text-gray-400 hover:text-red-500 transition-colors"><LogOut className="w-4 h-4" /></button>
         </div>
         
         <div className="flex-1 overflow-y-auto p-4 space-y-2">
           {profiles.map(profile => (
-            <button
-              key={profile.id}
-              onClick={() => handleSelectProfile(profile)}
-              className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
-                activeProfileId === profile.id
-                  ? 'bg-blue-50 text-blue-700 border border-blue-100'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
+            <button key={profile.id} onClick={() => handleSelectProfile(profile)} className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition-colors ${activeProfileId === profile.id ? 'bg-blue-50 text-blue-700 border border-blue-100' : 'text-gray-600 hover:bg-gray-100'}`}>
               {profile.name}
             </button>
           ))}
@@ -438,65 +480,39 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col items-center justify-start p-4 sm:p-8 overflow-y-auto">
-        <div className="max-w-3xl w-full">
+      {/* Center - Main Content Area */}
+      <div className="flex-1 flex flex-col p-4 sm:p-8 overflow-y-auto border-r border-gray-200">
+        <div className="max-w-3xl w-full mx-auto">
           
-          {/* Mode Toggle */}
           <div className="flex bg-gray-200 p-1 rounded-lg mb-6 w-fit mx-auto">
-            <button
-              onClick={() => setMode('single')}
-              className={`flex items-center px-6 py-2 rounded-md text-sm font-semibold transition-all ${mode === 'single' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-            >
+            <button onClick={() => setMode('single')} className={`flex items-center px-6 py-2 rounded-md text-sm font-semibold transition-all ${mode === 'single' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
               <Send className="w-4 h-4 mr-2" /> Single Send
             </button>
-            <button
-              onClick={() => setMode('sheet')}
-              className={`flex items-center px-6 py-2 rounded-md text-sm font-semibold transition-all ${mode === 'sheet' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-            >
+            <button onClick={() => setMode('sheet')} className={`flex items-center px-6 py-2 rounded-md text-sm font-semibold transition-all ${mode === 'sheet' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
               <Table className="w-4 h-4 mr-2" /> Sheet Automation
             </button>
           </div>
 
           <div className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
-            
-            {/* Header Section */}
             <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-8 py-8 text-white text-center relative">
-              <h2 className="text-2xl font-bold tracking-tight">
-                {activeProfile ? `Active: ${activeProfile.name}` : (mode === 'single' ? 'Create Application' : 'Sheet Automation')}
-              </h2>
-              <p className="mt-1 text-blue-100 text-sm max-w-sm mx-auto">
-                {mode === 'single' 
-                  ? 'Send a single tailored email manually.'
-                  : 'Enter HR emails below. We auto-send instantly when you leave the box.'}
-              </p>
+              <h2 className="text-2xl font-bold tracking-tight">{activeProfile ? `Active: ${activeProfile.name}` : (mode === 'single' ? 'Create Application' : 'Sheet Automation')}</h2>
+              <p className="mt-1 text-blue-100 text-sm max-w-sm mx-auto">{mode === 'single' ? 'Send a single tailored email manually.' : 'Enter HR emails below. We auto-send instantly.'}</p>
             </div>
 
             {mode === 'single' ? (
-              /* SINGLE MODE FORM */
               <div className="px-8 py-8">
                 <form onSubmit={handleSubmitSingle} className="space-y-6">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="space-y-2 relative">
                       <label className="block text-sm font-semibold text-gray-700">Recipient Email</label>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><User className="h-5 w-5 text-gray-400" /></div>
-                        <input
-                          type="email" required
-                          className="pl-10 block w-full rounded-lg border border-gray-300 px-4 py-2.5 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500"
-                          value={recipient} onChange={(e) => setRecipient(e.target.value)}
-                        />
+                      <div className="relative"><div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><User className="h-5 w-5 text-gray-400" /></div>
+                        <input type="email" required className="pl-10 block w-full rounded-lg border border-gray-300 px-4 py-2.5 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500" value={recipient} onChange={(e) => setRecipient(e.target.value)} />
                       </div>
                     </div>
                     <div className="space-y-2 relative">
                       <label className="block text-sm font-semibold text-gray-700">Subject Line</label>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><FileText className="h-5 w-5 text-gray-400" /></div>
-                        <input
-                          type="text" required
-                          className="pl-10 block w-full rounded-lg border border-gray-300 px-4 py-2.5 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500"
-                          value={subject} onChange={(e) => setSubject(e.target.value)}
-                        />
+                      <div className="relative"><div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><FileText className="h-5 w-5 text-gray-400" /></div>
+                        <input type="text" required className="pl-10 block w-full rounded-lg border border-gray-300 px-4 py-2.5 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500" value={subject} onChange={(e) => setSubject(e.target.value)} />
                       </div>
                     </div>
                   </div>
@@ -504,15 +520,9 @@ export default function Home() {
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="block text-sm font-semibold text-gray-700">Message Body</label>
-                      <button type="button" onClick={() => setIsHtmlMode(!isHtmlMode)} className={`flex items-center text-xs px-3 py-1.5 rounded-full font-medium ${isHtmlMode ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
-                        <Code className="w-3.5 h-3.5 mr-1" /> HTML Mode
-                      </button>
+                      <button type="button" onClick={() => setIsHtmlMode(!isHtmlMode)} className={`flex items-center text-xs px-3 py-1.5 rounded-full font-medium ${isHtmlMode ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}><Code className="w-3.5 h-3.5 mr-1" /> HTML Mode</button>
                     </div>
-                    <textarea
-                      required rows={6}
-                      className={`block w-full rounded-lg border border-gray-300 p-4 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500 ${isHtmlMode ? 'font-mono' : ''}`}
-                      value={body} onChange={(e) => setBody(e.target.value)}
-                    />
+                    <textarea required rows={6} className={`block w-full rounded-lg border border-gray-300 p-4 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500 ${isHtmlMode ? 'font-mono' : ''}`} value={body} onChange={(e) => setBody(e.target.value)} />
                   </div>
 
                   <div className="space-y-2">
@@ -544,13 +554,12 @@ export default function Home() {
                 </form>
               </div>
             ) : (
-              /* SHEET MODE */
               <div className="px-8 py-8 min-h-[400px]">
                 {!activeProfileId ? (
                   <div className="text-center py-12">
                     <AlertCircle className="w-12 h-12 text-yellow-500 mx-auto mb-4" />
                     <h3 className="text-lg font-bold text-gray-900">No Profile Selected</h3>
-                    <p className="text-gray-500 mt-2 max-w-sm mx-auto">Please select a profile from the left sidebar first. The automation needs to know what template and resume to send.</p>
+                    <p className="text-gray-500 mt-2 max-w-sm mx-auto">Please select a profile from the left sidebar first.</p>
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -564,17 +573,13 @@ export default function Home() {
                         <div className="col-span-1 text-center text-sm font-medium text-gray-400">{index + 1}</div>
                         <div className="col-span-7">
                           <input
-                            type="email"
-                            placeholder="Enter HR email..."
+                            type="email" placeholder="Enter HR email..."
                             className="w-full rounded-md border-transparent bg-gray-50 hover:bg-gray-100 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-200 px-3 py-2 text-sm transition-all"
-                            value={row.email}
-                            onChange={(e) => updateRowEmail(row.id, e.target.value)}
-                            onBlur={(e) => handleRowBlur(row.id, e.target.value)}
-                            disabled={row.status === 'sending' || row.status === 'success'}
+                            value={row.email} onChange={(e) => updateRowEmail(row.id, e.target.value)} onBlur={(e) => handleRowBlur(row.id, e.target.value)} disabled={row.status === 'sending' || row.status === 'success'}
                           />
                         </div>
                         <div className="col-span-4 flex items-center">
-                          {row.status === 'idle' && <span className="text-xs text-gray-400 italic opacity-0 group-hover:opacity-100 transition-opacity">Ready to send on leave...</span>}
+                          {row.status === 'idle' && <span className="text-xs text-gray-400 italic opacity-0 group-hover:opacity-100">Ready...</span>}
                           {row.status === 'sending' && <span className="flex items-center text-xs font-semibold text-blue-600"><Loader2 className="w-3 h-3 animate-spin mr-1" /> Sending...</span>}
                           {row.status === 'success' && <span className="flex items-center text-xs font-semibold text-green-600"><CheckCircle2 className="w-3 h-3 mr-1" /> Sent</span>}
                           {row.status === 'error' && <span className="flex items-center text-xs font-semibold text-red-600" title={row.message}><AlertCircle className="w-3 h-3 mr-1" /> Error</span>}
@@ -586,17 +591,58 @@ export default function Home() {
               </div>
             )}
             
-            {/* General Status Messages */}
             {status !== 'idle' && mode === 'single' && (
               <div className={`mx-8 mb-8 rounded-lg p-4 flex items-center ${status === 'success' ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
                 {status === 'success' ? <CheckCircle2 className="h-5 w-5 text-green-500 mr-3" /> : <AlertCircle className="h-5 w-5 text-red-500 mr-3" />}
                 <p className={`text-sm font-medium ${status === 'success' ? 'text-green-800' : 'text-red-800'}`}>{message}</p>
               </div>
             )}
-
           </div>
         </div>
       </div>
+
+      {/* Right Sidebar - Email Tracking logs */}
+      <div className="w-72 bg-white flex flex-col shrink-0">
+        <div className="p-4 border-b border-gray-200 bg-gray-50 flex items-center">
+          <Eye className="w-5 h-5 text-blue-600 mr-2" />
+          <h1 className="font-semibold text-gray-700">Email Tracking</h1>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {emailLogs.map(log => (
+            <div key={log.id} className="border border-gray-100 rounded-lg p-3 shadow-sm hover:shadow-md transition-shadow">
+              <div className="flex justify-between items-start mb-2">
+                <span className="text-xs font-semibold text-gray-800 truncate" title={log.recipient}>
+                  {log.recipient}
+                </span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${
+                  log.status === 'Opened' ? 'bg-green-100 text-green-700' :
+                  log.status === 'Sent' ? 'bg-blue-100 text-blue-700' :
+                  'bg-gray-100 text-gray-500'
+                }`}>
+                  {log.status}
+                </span>
+              </div>
+              <p className="text-[11px] text-gray-500 mb-2 truncate">Sub: {log.subject}</p>
+              
+              <div className="flex justify-between items-center text-[10px] text-gray-400">
+                <span className="flex items-center"><Clock className="w-3 h-3 mr-1" /> {new Date(log.created_at).toLocaleDateString()}</span>
+                {log.opened_at && <span className="text-green-600 font-medium">Read!</span>}
+              </div>
+            </div>
+          ))}
+          {emailLogs.length === 0 && (
+            <div className="text-center py-10">
+              <div className="bg-gray-100 w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-3">
+                <Eye className="w-6 h-6 text-gray-400" />
+              </div>
+              <p className="text-sm font-medium text-gray-600">No emails tracked yet</p>
+              <p className="text-xs text-gray-400 mt-1">Send an email to see activity here.</p>
+            </div>
+          )}
+        </div>
+      </div>
+
     </main>
   );
 }
