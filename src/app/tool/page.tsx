@@ -510,7 +510,7 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-gray-50 flex font-sans relative overflow-hidden">
+    <main className="h-screen bg-gray-50 flex font-sans relative overflow-hidden">
       
       {/* AI Tailor Modal */}
       {isAiModalOpen && (
