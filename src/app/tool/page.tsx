@@ -166,9 +166,9 @@ export default function Home() {
         const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
         if (error) throw error;
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       setStatus('error');
-      setMessage(error.message);
+      setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setAuthLoading(false);
     }
@@ -240,8 +240,8 @@ export default function Home() {
       setMessage('Profile saved successfully!');
       setStatus('success');
       await fetchProfiles();
-    } catch (error: any) {
-      setMessage(`Error saving profile: ${error.message}`);
+    } catch (error: unknown) {
+      setMessage(`Error saving profile: ${error instanceof Error ? error.message : String(error)}`);
       setStatus('error');
     } finally {
       setSaving(false);
@@ -326,9 +326,10 @@ export default function Home() {
       
       setIsAiModalOpen(false);
       setJobDescription('');
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(error);
-      alert(`Failed to generate AI response: ${error.message}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      alert(`Failed to generate AI response: ${msg}`);
     } finally {
       setIsAiGenerating(false);
     }
@@ -381,7 +382,7 @@ export default function Home() {
         setStatus('error');
         setMessage(`Error: ${data.error}`);
       }
-    } catch (error) {
+    } catch {
       if (trackingId) await updateTrackingLog(trackingId, 'Error');
       setStatus('error');
       setMessage('An unexpected error occurred.');
@@ -440,7 +441,7 @@ export default function Home() {
         if (trackingId) await updateTrackingLog(trackingId, 'Error');
         setRows(prev => prev.map(r => r.id === rowId ? { ...r, status: 'error', message: data.error } : r));
       }
-    } catch (error) {
+    } catch {
       if (trackingId) await updateTrackingLog(trackingId, 'Error');
       setRows(prev => prev.map(r => r.id === rowId ? { ...r, status: 'error', message: 'Failed to send' } : r));
     }
@@ -740,7 +741,7 @@ export default function Home() {
                     </div>
                     {leads.length === 0 && <p className="text-gray-500 text-center py-10">No jobs found right now.</p>}
                     
-                    {leads.map((job: any) => (
+                    {leads.map((job: { id: string; title: string; company_name: string; candidate_required_location: string; url: string; tags?: string[]; publication_date: string }) => (
                       <div key={job.id} className="border border-gray-200 rounded-xl p-5 hover:border-blue-300 hover:shadow-md transition-all group bg-white">
                         <div className="flex justify-between items-start">
                           <div>

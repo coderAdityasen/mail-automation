@@ -38,7 +38,7 @@ Follow these rules:
       prompt: `Original Email Body:\n${currentBody || 'I am writing to apply for the open position at your company.'}\n\nJob Description:\n${jobDescription}\n\nPlease tailor the email body to this job description.`,
     });
 
-    return result.toDataStreamResponse();
+    return result.toTextStreamResponse();
   } catch (error: unknown) {
     console.error("AI Tailor Error:", error);
     const errorMessage = error instanceof Error ? error.message : "Something went wrong while generating the response.";
